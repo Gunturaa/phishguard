@@ -48,10 +48,12 @@ Open http://localhost:3000
 - Displays a clearly labeled preliminary/demo response
 
 ## Important
-Do not visit submitted URLs automatically. Do not send credentials, cookies, or personal data to scanned sites. The initial endpoint is only a placeholder and must not be represented as a reliable security verdict. Later stages will add:
+Do not visit submitted URLs automatically. Do not send credentials, cookies, or personal data to scanned sites. Reputation providers are optional and failures are surfaced as unavailable rather than treated as clean:
 1. URL feature extraction and a trained/evaluated ML model
 2. Heuristic rules
-3. Google Web Risk lookup, with API key stored only on the backend
+3. Google Web Risk and/or VirusTotal lookup, with API keys stored only on the backend
 4. Supabase scan history (optional authentication)
+
+VirusTotal uses a passive report lookup only; it does not upload submitted URLs. The public API is rate-limited (commonly 4 requests/minute), so it should be enabled only when the quota and provider terms are appropriate.
 
 Never commit `.env.local`, API keys, or model/data files containing secrets.

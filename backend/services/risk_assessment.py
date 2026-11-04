@@ -1,5 +1,6 @@
 import os
 from typing import Any, Dict
+from urllib.parse import urlparse
 
 
 def _read_float(name: str, default: float, minimum: float, maximum: float) -> float:
@@ -33,12 +34,18 @@ class RiskAssessor:
         self.suspicious_threshold = _read_float("RISK_SUSPICIOUS_THRESHOLD", 35.0, 0.0, 100.0)
         if self.suspicious_threshold >= self.phishing_threshold:
             raise ValueError("RISK_SUSPICIOUS_THRESHOLD harus lebih kecil dari RISK_PHISHING_THRESHOLD.")
+        self.trusted_domains = {
+            domain.strip().lower().lstrip(".")
+            for domain in os.getenv("TRUSTED_DOMAINS", "").split(",")
+            if domain.strip()
+        }
 
     def assess(
         self,
         ml_result: Dict[str, Any],
         heuristic_result: Dict[str, Any],
         threat_result: Dict[str, Any],
+        url: str = "",
     ) -> Dict[str, Any]:
         ml_score = float(ml_result.get("probabilities", {}).get("phishing", 0.0)) * 100
         heuristic_score = float(heuristic_result.get("risk_score", 0.0))
@@ -47,9 +54,22 @@ class RiskAssessor:
         )
 
         threat_status = threat_result.get("status")
+        hostname = (urlparse(url).hostname or "").lower()
+        trusted_domain = any(
+            hostname == domain or hostname.endswith(f".{domain}")
+            for domain in self.trusted_domains
+        )
+        trusted_context = trusted_domain and (
+            heuristic_result.get("status") == "SAFE"
+            and threat_status != "THREAT_DETECTED"
+        )
+
         if threat_status == "THREAT_DETECTED":
             combined_score = max(combined_score, 90)
             final_status = "PHISHING"
+        elif trusted_context:
+            combined_score = min(combined_score, self.suspicious_threshold - 1)
+            final_status = "SAFE"
         elif combined_score >= self.phishing_threshold:
             final_status = "PHISHING"
         elif combined_score >= self.suspicious_threshold:
@@ -64,6 +84,8 @@ class RiskAssessor:
             conflicts.append("ML mengklasifikasikan legitimate, tetapi heuristik mendeteksi indikator phishing.")
         if threat_status in {"UNAVAILABLE", "ERROR"}:
             conflicts.append("Threat Intelligence tidak tersedia; hasil akhir tidak menggunakan konfirmasi provider.")
+        if trusted_context and ml_result.get("status") == "PHISHING":
+            conflicts.append("Model memberi false positive pada domain yang dikonfigurasi sebagai domain tepercaya; status diturunkan karena heuristik aman dan tidak ada ancaman Web Risk.")
 
         return {
             "final_status": final_status,
@@ -77,6 +99,7 @@ class RiskAssessor:
                 "heuristic_weight": self.heuristic_weight,
                 "phishing_threshold": self.phishing_threshold,
                 "suspicious_threshold": self.suspicious_threshold,
+                "trusted_domain_match": trusted_context,
             },
             "conflicts": conflicts,
         }

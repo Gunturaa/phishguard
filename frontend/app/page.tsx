@@ -27,6 +27,7 @@ import {
 
 type ScanResult = {
   ok: boolean;
+  history_id?: number;
   url?: string;
   final_status?: "SAFE" | "SUSPICIOUS" | "PHISHING";
   risk_score?: number;
@@ -54,6 +55,23 @@ type HistoryItem = {
   timestamp: string;
 };
 
+type VulnerabilityResult = {
+  status: string;
+  target: string;
+  http_status?: number | null;
+  risk_level?: string;
+  risk_ratings?: Record<string, number>;
+  scan_information?: { duration_seconds: number; tests_performed: number; scan_status: string };
+  redirect?: string;
+  technologies?: Array<{ name: string; category: string; source: string }>;
+  robots_txt?: { found: boolean; content?: string };
+  findings_count: number;
+  findings: Array<{ rule: string; severity: string; title: string; recommendation: string; evidence?: string }>;
+  recommendations: string[];
+  error?: string;
+  disclaimer: string;
+};
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
 
 const SAMPLE_URLS = [
@@ -73,6 +91,9 @@ export default function Home() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [vulnLoading, setVulnLoading] = useState(false);
+  const [vulnAuthorized, setVulnAuthorized] = useState(false);
+  const [vulnResult, setVulnResult] = useState<VulnerabilityResult | null>(null);
 
   // Load history from localStorage
   useEffect(() => {
@@ -146,6 +167,33 @@ export default function Home() {
     triggerScan(url);
   }
 
+  async function runVulnerabilityCheck() {
+    if (!url.trim() || !vulnAuthorized) return;
+    setVulnLoading(true);
+    setVulnResult(null);
+    try {
+      const response = await fetch(`${API_BASE}/web-vuln-check`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, authorized: true }),
+      });
+      const data: VulnerabilityResult = await response.json();
+      setVulnResult(response.ok ? data : { ...data, status: "ERROR", error: data.error || "Pemeriksaan gagal." });
+    } catch {
+      setVulnResult({
+        status: "UNAVAILABLE",
+        target: url,
+        findings_count: 0,
+        findings: [],
+        recommendations: [],
+        error: "Backend tidak dapat dihubungi.",
+        disclaimer: "Pemeriksaan pasif terbatas.",
+      });
+    } finally {
+      setVulnLoading(false);
+    }
+  }
+
   function copyReport() {
     if (!result) return;
     const reportText = `[PHISHGUARD SECURITY REPORT]
@@ -159,6 +207,11 @@ Date: ${new Date().toLocaleString()}`;
     navigator.clipboard.writeText(reportText);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  }
+
+  function downloadPdfReport() {
+    if (!result?.history_id) return;
+    window.open(`${API_BASE}/history/${result.history_id}/report.pdf`, "_blank", "noopener,noreferrer");
   }
 
   // Parse breakdown of URL
@@ -279,6 +332,21 @@ Date: ${new Date().toLocaleString()}`;
           <div className="privacy-note">
             <CheckCircle2 size={14} /> No automatic navigation <span>·</span> <CheckCircle2 size={14} /> API keys stay server-side
           </div>
+          <div className="vuln-tools">
+            <label><input type="checkbox" checked={vulnAuthorized} onChange={(event) => setVulnAuthorized(event.target.checked)} /> Saya memiliki izin untuk memeriksa target ini</label>
+            <button type="button" className="vuln-button" disabled={!vulnAuthorized || vulnLoading || !url.trim()} onClick={runVulnerabilityCheck}>
+              {vulnLoading ? <><LoaderCircle className="spin" size={15} /> Checking security...</> : <><ShieldAlert size={15} /> Passive web vulnerability check</>}
+            </button>
+          </div>
+          {vulnResult && <div className={`vuln-result vuln-${vulnResult.status.toLowerCase()}`} role="status">
+            <div className="vuln-result-head"><strong>WEB SECURITY: {vulnResult.status}</strong><span>{vulnResult.findings_count} findings</span></div>
+            {vulnResult.risk_ratings && <div className="vuln-summary"><strong>Overall risk: {vulnResult.risk_level}</strong><span>Critical {vulnResult.risk_ratings.CRITICAL || 0}</span><span>High {vulnResult.risk_ratings.HIGH || 0}</span><span>Medium {vulnResult.risk_ratings.MEDIUM || 0}</span><span>Low {vulnResult.risk_ratings.LOW || 0}</span><span>Info {vulnResult.risk_ratings.INFO || 0}</span></div>}
+            {vulnResult.scan_information && <div className="vuln-scan-info"><span>{vulnResult.scan_information.tests_performed} checks</span><span>{vulnResult.scan_information.duration_seconds}s</span><span>HTTP {vulnResult.http_status || "—"}</span><span>{vulnResult.redirect}</span></div>}
+            {vulnResult.technologies?.length ? <div className="vuln-tech"><span className="vuln-label">TECHNOLOGY FINGERPRINT</span>{vulnResult.technologies.map((technology) => <span key={`${technology.category}-${technology.name}`}>{technology.name} <small>{technology.category}</small></span>)}</div> : null}
+            {vulnResult.robots_txt?.found && <div className="vuln-robots"><strong>robots.txt found</strong><small>Review entries manually; robots.txt is not an access control.</small></div>}
+            {vulnResult.error ? <p>{vulnResult.error}</p> : vulnResult.findings.map((finding) => <div className="vuln-finding" key={finding.rule}><span className={`severity severity-${finding.severity.toLowerCase()}`}>{finding.severity}</span><div><strong>{finding.title}</strong><p>{finding.recommendation}</p>{finding.evidence && <code>{finding.evidence}</code>}</div></div>)}
+            <small>{vulnResult.disclaimer}</small>
+          </div>}
 
           {result && !result.ok && (
             <div className="error-box" role="alert">
@@ -313,7 +381,7 @@ Date: ${new Date().toLocaleString()}`;
             </div>
             <div>
               <span className="layer-icon green"><Globe2 size={17} /></span>
-              <span><strong>Threat intelligence</strong><small>Google Web Risk lookup</small></span>
+              <span><strong>Threat intelligence</strong><small>Configured reputation providers</small></span>
               <i>03</i>
             </div>
           </div>
@@ -384,6 +452,10 @@ Date: ${new Date().toLocaleString()}`;
                 <button className="copy-report-btn" onClick={copyReport} title="Copy summary to clipboard">
                   {copied ? <CheckCircle2 size={14} /> : <Copy size={14} />}
                   <span>{copied ? "Copied!" : "Copy Report"}</span>
+                </button>
+                <button className="copy-report-btn" onClick={downloadPdfReport} disabled={!result.history_id} title="Download PDF report">
+                  <ExternalLink size={14} />
+                  <span>PDF Report</span>
                 </button>
               </div>
               <p className="raw-url-text">{result.url}</p>

@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -16,7 +17,11 @@ from services.ml_detector import ml_detector
 from services.risk_assessment import risk_assessor
 from services.scan_metadata import build_scan_metadata
 from services.external_metadata import external_metadata
-from services.threat_intelligence import google_web_risk
+from services.threat_intelligence import threat_intelligence
+from services.web_vulnerability_checker import web_vulnerability_checker
+from services.scan_storage import scan_storage
+from services.report_generator import build_pdf
+from services.notifications import notify_discord
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,6 +53,13 @@ class ScanRequest(BaseModel):
         description="URL yang akan dianalisis keamanannya"
     )
 
+class WebVulnerabilityRequest(BaseModel):
+    url: str = Field(..., min_length=4, max_length=2048)
+    authorized: bool = Field(
+        ...,
+        description="Harus true: pemohon memiliki atau berwenang menguji target."
+    )
+
 class MLResult(BaseModel):
     status: str
     predicted_class: Optional[int] = None
@@ -69,6 +81,7 @@ class ThreatIntelResult(BaseModel):
 
 class ScanResponse(BaseModel):
     ok: bool
+    history_id: Optional[int] = None
     url: str
     final_status: str
     risk_score: Optional[int] = None
@@ -163,6 +176,49 @@ def health_check():
         "total_features": len(ml_detector.feature_names)
     }
 
+@app.get("/history")
+def scan_history(limit: int = 20):
+    return {"items": scan_storage.list_recent(limit)}
+
+@app.get("/history/{record_id}")
+def scan_history_detail(record_id: int):
+    record = scan_storage.get(record_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Riwayat scan tidak ditemukan.")
+    return record
+
+@app.get("/history/{record_id}/report.pdf")
+def scan_history_report(record_id: int):
+    record = scan_storage.get(record_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Riwayat scan tidak ditemukan.")
+    pdf = build_pdf("PHISHGUARD Security Report", record["result"])
+    return StreamingResponse(
+        pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="phishguard-report-{record_id}.pdf"'},
+    )
+
+@app.post("/web-vuln-check")
+def web_vulnerability_check(payload: WebVulnerabilityRequest):
+    """Passive, non-exploitative checks for an explicitly authorized target."""
+    if not payload.authorized:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Konfirmasi otorisasi diperlukan untuk pemeriksaan keamanan web."
+        )
+    normalized_url = validate_and_sanitize_url(payload.url)
+    result = web_vulnerability_checker.check(normalized_url)
+    scan_storage.save(
+        "web_vulnerability",
+        normalized_url,
+        result.get("status", "UNKNOWN"),
+        result,
+    )
+    if result.get("risk_level") in {"High", "Medium"}:
+        notify_discord("Passive vulnerability result", result)
+    return result
+
 @app.post("/scan", response_model=ScanResponse)
 def scan_url(payload: ScanRequest):
     """
@@ -181,7 +237,7 @@ def scan_url(payload: ScanRequest):
 
     # Analisis heuristik dijalankan terpisah dari prediksi ML.
     heuristic_output = heuristic_detector.analyze(normalized_url)
-    threat_output = google_web_risk.check_url(normalized_url)
+    threat_output = threat_intelligence.check_url(normalized_url)
     scan_metadata = build_scan_metadata(normalized_url)
     scan_metadata.update(external_metadata.collect(normalized_url))
 
@@ -189,6 +245,7 @@ def scan_url(payload: ScanRequest):
         ml_output,
         heuristic_output,
         threat_output,
+        normalized_url,
     )
     final_status = assessment["final_status"]
     risk_score = assessment["risk_score"]
@@ -210,7 +267,7 @@ def scan_url(payload: ScanRequest):
             "Hindari memasukkan data sensitif sampai URL terverifikasi."
         ]
 
-    return {
+    result = {
         "ok": True,
         "url": normalized_url,
         "final_status": final_status,
@@ -224,3 +281,6 @@ def scan_url(payload: ScanRequest):
         "scan_metadata": scan_metadata,
         "disclaimer": "PHISHGUARD menggunakan analisis berbasis AI untuk deteksi risiko. Hasil ini adalah indikasi keamanan dan bukan jaminan mutlak."
     }
+    history_id = scan_storage.save("url_scan", normalized_url, final_status, result, risk_score)
+    result["history_id"] = history_id
+    return result

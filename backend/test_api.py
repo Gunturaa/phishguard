@@ -7,7 +7,7 @@ import sys
 import os
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from main import app, root, health_check, scan_url, ScanRequest
+from main import app, root, health_check, scan_url, ScanRequest, WebVulnerabilityRequest, web_vulnerability_check
 from fastapi import HTTPException
 
 def run_tests():
@@ -48,7 +48,11 @@ def run_tests():
     print(f"    [+] Final Status: {res_legit['final_status']}")
     assert res_legit["heuristic_analysis"]["status"] in {"SAFE", "SUSPICIOUS", "PHISHING"}
     assert isinstance(res_legit["heuristic_analysis"]["findings"], list)
-    assert res_legit["threat_intelligence"]["provider"] == "Google Web Risk"
+    assert res_legit["threat_intelligence"]["provider"] in {
+        "Google Web Risk",
+        "VirusTotal",
+        "Google Web Risk + VirusTotal",
+    }
     assert res_legit["threat_intelligence"]["status"] in {
         "CLEAN", "THREAT_DETECTED", "UNAVAILABLE", "ERROR"
     }
@@ -75,6 +79,15 @@ def run_tests():
     }
     assert res_phish["risk_assessment"]["final_status"] == res_phish["final_status"]
     print("    [V] Deteksi Phishing berhasil!")
+
+    # 5.5. Trusted domain context must suppress a model-only false positive.
+    print("\n[5.5] Menguji Konteks Domain Tepercaya...")
+    trusted_result = scan_url(ScanRequest(url="https://pik2official.id/sitemap.xml"))
+    assert trusted_result["machine_learning"]["status"] == "PHISHING"
+    assert trusted_result["heuristic_analysis"]["status"] == "SAFE"
+    assert trusted_result["final_status"] == "SAFE"
+    assert trusted_result["risk_assessment"]["configuration"]["trusted_domain_match"] is True
+    print(f"    [+] ML false positive diturunkan: {trusted_result['final_status']} ({trusted_result['risk_score']}/100)")
 
     # 5. Test indikator heuristik yang eksplisit
     print("\n[5] Menguji Heuristic Detection...")
@@ -118,8 +131,20 @@ def run_tests():
         assert e.status_code == 400
         print(f"    [+] SSRF private IP dicegah : {e.detail}")
 
+    # 7. Test otorisasi web vulnerability check
+    print("\n[7] Menguji Otorisasi Web Vulnerability Check...")
+    try:
+        web_vulnerability_check(WebVulnerabilityRequest(
+            url="https://example.com",
+            authorized=False,
+        ))
+        assert False, "Harusnya menolak pemeriksaan tanpa otorisasi!"
+    except HTTPException as e:
+        assert e.status_code == 403
+        print(f"    [+] Otorisasi wajib diterapkan: {e.detail}")
+
     print("\n" + "=" * 70)
-    print("[V] SEMUA VALIDASI TAHAP 6 BERHASIL DENGAN SUKSES!")
+    print("[V] SEMUA VALIDASI BACKEND BERHASIL DENGAN SUKSES!")
     print("=" * 70)
 
 if __name__ == "__main__":
